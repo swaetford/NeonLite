@@ -1,15 +1,38 @@
-﻿using HarmonyLib;
+﻿
+using HarmonyLib;
+using MelonLoader;
 using Steamworks;
 using System.Collections;
 using System.Reflection;
+using System.Reflection.Emit;
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.Rendering;
+using static UnityEngine.Rendering.DebugUI;
 using Debug = UnityEngine.Debug;
 
 namespace NeonWhiteQoL
 {
     public class CheaterBanlist : MonoBehaviour
     {
+        // These changes allow for a global leaderboard display without any cheaters, for players at the top of the leaderboard
+        // rankCount specifies the cutoff point - I've tried it for up to 500. Higher numbers have slower load times and ping the api more.
+
+        // recommend 200?? will use this as example. Depends on how many cheaters on the stage I guess. Could configure in options with a max limit.
+
+        // Eg.  a player is within top 200 on steam leaderboard, it downloads all scores from rank 1 to 200, filters through the results and removes cheaters and shows true ranks
+        // Does introduce a gap - so for example on forgotten city goes from 152 to rank 200.
+
+        // The OnLeaderboardScoreDownloadGlobalResult2 method is patched with a transpiler so it can download 200 scores instead of the hardcoded 10
+
+        // If this happens then a prefix is applied to DisplayScores_AsyncRecieve which removes the cheaters and gets the correct entries to display
+        // Ranks are corrected afterwards to ensure correct ordering
+
+        // pagination is a little funny if there are lots of cheaters and you are moving right, there will be overlaps in the pages displayed
+        // appears to work for global neon rankings
+        // unsure if it interferes with friends leaderboard fix as I don't have enough steam friends on this game to fill the page
+
+
         // the private static attribute below is used for debugging purposes and getting steamids lol
         private static FieldInfo currentLeaderboardEntriesGlobal = typeof(LeaderboardIntegrationSteam).GetField("currentLeaderboardEntriesGlobal", BindingFlags.NonPublic | BindingFlags.Static);
         public static bool isLoaded = false;
@@ -19,25 +42,45 @@ namespace NeonWhiteQoL
         public static ulong[] bannedIDs;
         public static string test = string.Empty;
 
+        // used to store top rank requested for a page
+        public static int rankStart = 0;
+
+        // Rank count at which to calculate true rank (eg if we are in top 200, download ranks 1-200 and remove cheaters)
+        // Increases load time if higher, plus we may get in trouble for too many requests to leaderboard API.
+        public static int rankCount = 500;
+
+        // stores fake/true ranks for remapping display
+        public static Dictionary<int, int> ranksDict = new Dictionary<int, int>();
+
+
         public void Start()
         {
             StartCoroutine(DownloadCheaters());
 
             MethodInfo target = typeof(LeaderboardIntegrationSteam).GetMethod("GetScoreDataAtGlobalRank", BindingFlags.Static | BindingFlags.Public);
-            HarmonyMethod patch = new(typeof(CheaterBanlist).GetMethod("PreGetScoreDataAtGlobalRank"));
-            NeonLite.Harmony.Patch(target, patch);
+            HarmonyMethod postfix = new(typeof(CheaterBanlist).GetMethod("PreGetScoreDataAtGlobalRank"));
+            NeonLite.Harmony.Patch(target, postfix);
 
             target = typeof(SteamUserStats).GetMethod("GetDownloadedLeaderboardEntry", BindingFlags.Static | BindingFlags.Public);
-            patch = new(typeof(CheaterBanlist).GetMethod("PostGetDownloadedLeaderboardEntry"));
-            NeonLite.Harmony.Patch(target, null, patch);
+            postfix = new(typeof(CheaterBanlist).GetMethod("PostGetDownloadedLeaderboardEntry"));
+            NeonLite.Harmony.Patch(target, null, postfix);
 
             target = typeof(LeaderboardScore).GetMethod("SetScore");
-            patch = new(typeof(CheaterBanlist).GetMethod("PostSetScore"));
-            NeonLite.Harmony.Patch(target, null, patch);
+            HarmonyMethod prefix = new(typeof(CheaterBanlist).GetMethod("PreSetScore"));
+            NeonLite.Harmony.Patch(target, prefix);
 
             target = typeof(Leaderboards).GetMethod("DisplayScores_AsyncRecieve");
-            patch = new(typeof(CheaterBanlist).GetMethod("PostDisplayScores_AsyncRecieve"));
-            NeonLite.Harmony.Patch(target, null, patch);
+            prefix = new(typeof(CheaterBanlist).GetMethod("PreDisplayScores_AsyncRecieve"));
+            postfix = new(typeof(CheaterBanlist).GetMethod("PostDisplayScores_AsyncRecieve"));
+            NeonLite.Harmony.Patch(target, prefix, postfix);
+
+            target = typeof(SteamUserStats).GetMethod("DownloadLeaderboardEntries", BindingFlags.Static | BindingFlags.Public);
+            postfix = new(typeof(CheaterBanlist).GetMethod("PreDownloadLeaderboardEntries"));
+            NeonLite.Harmony.Patch(target, postfix);
+
+            target = typeof(LeaderboardIntegrationSteam).GetMethod("OnLeaderboardScoreDownloadGlobalResult2", BindingFlags.Static | BindingFlags.Public);
+            HarmonyMethod transpiler = new(typeof(CheaterBanlist).GetMethod("Transpiler"));
+            NeonLite.Harmony.Patch(target, null, null, transpiler);
         }
 
         public IEnumerator DownloadCheaters()
@@ -79,24 +122,88 @@ namespace NeonWhiteQoL
             CheaterBanlist.globalRank = globalRank;
         }
 
-        public static void PostGetDownloadedLeaderboardEntry(ref SteamLeaderboardEntries_t hSteamLeaderboardEntries, ref int index, LeaderboardEntry_t pLeaderboardEntry, ref int[] pDetails, ref int cDetailsMax, ref bool __result)
+        public static void PostGetDownloadedLeaderboardEntry(ref SteamLeaderboardEntries_t hSteamLeaderboardEntries, ref int index, ref LeaderboardEntry_t pLeaderboardEntry, ref int[] pDetails, ref int cDetailsMax, ref bool __result)
         {
             if (friendsOnly != null && pLeaderboardEntry.m_steamIDUser.m_SteamID != 0 && bannedIDs.Contains(pLeaderboardEntry.m_steamIDUser.m_SteamID))
+            {
                 cheaters.Add((bool)friendsOnly ? globalRank : pLeaderboardEntry.m_nGlobalRank);
+            }
             friendsOnly = null;
         }
 
-        public static void PostSetScore(LeaderboardScore __instance, ref ScoreData newData, ref bool globalNeonRankings)
+        public static void PreDownloadLeaderboardEntries(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, ref int nRangeStart, ref int nRangeEnd)
         {
-            //SteamUserStats.GetDownloadedLeaderboardEntry((SteamLeaderboardEntries_t)currentLeaderboardEntriesGlobal.GetValue(null), (newData._ranking - 1) % 10, out LeaderboardEntry_t leaderboardEntry_t, new int[1], 1);
-            //Debug.Log(leaderboardEntry_t.m_steamIDUser.m_SteamID + " " + newData._ranking);
-            if (!cheaters.Contains(newData._ranking)) return;
-
-            __instance._ranking.color = Color.red;
-            __instance._username.color = Color.red;
-            __instance._scoreValue.color = Color.red;
+            rankStart = nRangeStart; // highest rank on page requested
+            if (rankStart < rankCount && eLeaderboardDataRequest != ELeaderboardDataRequest.k_ELeaderboardDataRequestFriends)
+            {
+                nRangeStart = 0;
+                nRangeEnd = rankCount;
+            }
         }
 
-        public static void PostDisplayScores_AsyncRecieve() => cheaters.Clear();
+        public static void PreSetScore(ref ScoreData newData, ref bool globalNeonRankings)
+        {
+            newData._ranking = ranksDict[newData._ranking];
+        }
+
+        public static void PostDisplayScores_AsyncRecieve()
+        {
+            cheaters.Clear();
+            ranksDict.Clear();
+        }
+
+
+        public static void PreDisplayScores_AsyncRecieve(ref ScoreData[] scoreDatas)
+        {
+            // if we are in the top rankCount ranks, recalculate and return first 10 non cheaters higher than starting rank
+            // if only scoreDatas.Length is 10 or less then this is a friends page so don't do anything
+            if (rankStart < rankCount && scoreDatas.Length > 10)
+            {
+                ScoreData[] resultScoreDatas = new ScoreData[10];
+                int fixedRank = 0;
+                int j = 0;
+
+                for (int i = 0; i < scoreDatas.Length; i++)
+                {
+                    if (!cheaters.Contains(scoreDatas[i]._ranking))
+                    {
+                        fixedRank += 1;
+                        if (scoreDatas[i]._ranking >= rankStart)
+                        {
+                            // store fixed ranks in dict to apply after setscore is called
+                            ranksDict.Add(scoreDatas[i]._ranking, fixedRank);
+                            resultScoreDatas[j] = scoreDatas[i];
+                            j += 1;
+                        }
+                    }
+                    if (j == 10) break;
+                }
+                scoreDatas = resultScoreDatas;
+            }
+            else
+            {
+                ;
+                for (int i = 0; i < 10; i++)
+                {
+                    ranksDict.Add(scoreDatas[i]._ranking, scoreDatas[i]._ranking);
+                }
+            }
+        }
+
+        public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var codes = new List<CodeInstruction>(instructions);
+            for (var i = 0; i < codes.Count; i++)
+            {
+                // Iterate through and replace hardcoded request count - there is only one opcode in this method that matches the instruction for this
+                if (codes[i].opcode == OpCodes.Ldc_I4_S)
+                {
+                    codes[i].opcode = OpCodes.Ldc_I4; // change instruction to push int32 instead of int8, needed if rankcount >= 128
+                    codes[i].operand = rankCount; // specified number of results to download
+                }
+            }
+            return codes.AsEnumerable();
+        }
+
     }
 }
