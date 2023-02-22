@@ -1,6 +1,7 @@
 ﻿
 using HarmonyLib;
 using MelonLoader;
+using Microsoft.SqlServer.Server;
 using Steamworks;
 using System.Collections;
 using System.Reflection;
@@ -16,14 +17,15 @@ namespace NeonWhiteQoL
     public class CheaterBanlist : MonoBehaviour
     {
         // These changes allow for a global leaderboard display without any cheaters, for players at the top of the leaderboard
-        // rankCount specifies the cutoff point - I've tried it for up to 500. Higher numbers have slower load times and ping the api more.
+        // rankCount specifies the cutoff point, longer times will introduce a larger delay when cycling through pages + it hits the api harder
+        // I have been testing with 500, the delay is fine for me and my country doesn't have any steam servers, YMMV
 
-        // recommend 200?? will use this as example. Depends on how many cheaters on the stage I guess. Could configure in options with a max limit.
 
-        // Eg.  a player is within top 200 on steam leaderboard, it downloads all scores from rank 1 to 200, filters through the results and removes cheaters and shows true ranks
-        // Does introduce a gap - so for example on forgotten city goes from 152 to rank 200.
+        // Eg. rankCount = 500.
+        // If a player is within top 500 on steam leaderboard, it downloads all scores from rank 1 to 500, filters through the results and removes cheaters and shows true ranks
+        // Does introduce a gap when you are going down the leaderboard and it cuts from removing cheaters to showing ranks normally
 
-        // The OnLeaderboardScoreDownloadGlobalResult2 method is patched with a transpiler so it can download 200 scores instead of the hardcoded 10
+        // The OnLeaderboardScoreDownloadGlobalResult2 method is patched with a transpiler so it will download as many scores as requested instead of the hardcoded 10
 
         // If this happens then a prefix is applied to DisplayScores_AsyncRecieve which removes the cheaters and gets the correct entries to display
         // Ranks are corrected afterwards to ensure correct ordering
@@ -182,7 +184,6 @@ namespace NeonWhiteQoL
             }
             else
             {
-                ;
                 for (int i = 0; i < 10; i++)
                 {
                     ranksDict.Add(scoreDatas[i]._ranking, scoreDatas[i]._ranking);
@@ -195,11 +196,18 @@ namespace NeonWhiteQoL
             var codes = new List<CodeInstruction>(instructions);
             for (var i = 0; i < codes.Count; i++)
             {
-                // Iterate through and replace hardcoded request count - there is only one opcode in this method that matches the instruction for this
-                if (codes[i].opcode == OpCodes.Ldc_I4_S)
+                // run through instructions and replace hardcoded request count - there is only one opcode in the the method to search for
+                if (codes[i].opcode == OpCodes.Ldc_I4_S) // original instruction loads int8 value (operand 10) onto stack (for length of scoredata)
                 {
-                    codes[i].opcode = OpCodes.Ldc_I4; // change instruction to push int32 instead of int8, needed if rankcount >= 128
-                    codes[i].operand = rankCount; // specified number of results to download
+                    codes[i].opcode = OpCodes.Ldarg_0; // load argument LeaderboardScoresDownloaded_t onto stack
+                    codes.Insert(
+                        i + 1, 
+                        new CodeInstruction(
+                            opcode: OpCodes.Ldfld, // load field m_cEntryCount from this onto stack
+                            operand: typeof(LeaderboardScoresDownloaded_t).GetField("m_cEntryCount", BindingFlags.Public | BindingFlags.Instance)
+                            )
+                        );
+                    break;
                 }
             }
             return codes.AsEnumerable();
