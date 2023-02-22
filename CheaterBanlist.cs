@@ -28,13 +28,12 @@ namespace NeonWhiteQoL
         // The OnLeaderboardScoreDownloadGlobalResult2 method is patched with a transpiler so it will download as many scores as requested instead of the hardcoded 10
 
         // If this happens then a prefix is applied to DisplayScores_AsyncRecieve which removes the cheaters and gets the correct entries to display
-        // Ranks are corrected afterwards to ensure highestRanking is set correctly
+        // Ranks are corrected afterwards to ensure correct ordering
 
-        // pagination is a little funny if there are lots of cheaters, the pages will overlap.
-        // theres probably a way to fix this by patching the page methods as in the leaderboard fix
+        // pagination is a little funny if there are lots of cheaters and you are moving right, there will be overlaps in the pages displayed
+        // appears to work for global neon rankings
+        // unsure if it interferes with friends leaderboard fix as I don't have enough steam friends on this game to fill the page
 
-        // btw unsure if it interferes with friends leaderboard fix as I don't have enough steam friends playing this game to fill the page ...
-        // I think it works for global neon rankings but im not ranked in top 500 so can't check properly
 
         // the private static attribute below is used for debugging purposes and getting steamids lol
         private static FieldInfo currentLeaderboardEntriesGlobal = typeof(LeaderboardIntegrationSteam).GetField("currentLeaderboardEntriesGlobal", BindingFlags.NonPublic | BindingFlags.Static);
@@ -48,9 +47,8 @@ namespace NeonWhiteQoL
         // used to store top rank requested for a page
         public static int rankStart = 0;
 
-        // Rank count at which to calculate true rank (eg if we are in top 500, download ranks 1-500 and remove cheaters)
+        // Rank count at which to calculate true rank (eg if we are in top 200, download ranks 1-200 and remove cheaters)
         // Increases load time if higher, plus we may get in trouble for too many requests to leaderboard API.
-        // must be greater than 10
         public static int rankCount = 500;
 
         // stores fake/true ranks for remapping display
@@ -138,10 +136,8 @@ namespace NeonWhiteQoL
         public static void PreDownloadLeaderboardEntries(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, ref int nRangeStart, ref int nRangeEnd)
         {
             rankStart = nRangeStart; // highest rank on page requested
-            // if in top ranks and not getting data for friends leaderboard increase count requested
             if (rankStart < rankCount && eLeaderboardDataRequest != ELeaderboardDataRequest.k_ELeaderboardDataRequestFriends)
             {
-                 // remember what rank we are supposed to start display on
                 nRangeStart = 0;
                 nRangeEnd = rankCount;
             }
@@ -162,7 +158,7 @@ namespace NeonWhiteQoL
         public static void PreDisplayScores_AsyncRecieve(ref ScoreData[] scoreDatas)
         {
             // if we are in the top rankCount ranks, recalculate and return first 10 non cheaters higher than starting rank
-            // if only scoreDatas.Length is 10 or less then this is a friends page or we aren't in the top ranks so don't do anything (pass scoreDatas as normal)
+            // if only scoreDatas.Length is 10 or less then this is a friends page so don't do anything
             if (rankStart < rankCount && scoreDatas.Length > 10)
             {
                 ScoreData[] resultScoreDatas = new ScoreData[10];
