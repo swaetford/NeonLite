@@ -3,12 +3,16 @@ using HarmonyLib;
 using MelonLoader;
 using Microsoft.SqlServer.Server;
 using Steamworks;
+using System;
 using System.Collections;
 using System.Reflection;
 using System.Reflection.Emit;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.Rendering;
+using UnityEngine.SocialPlatforms;
+using UnityEngine.SocialPlatforms.Impl;
+using static MelonLoader.MelonLogger;
 using static UnityEngine.Rendering.DebugUI;
 using Debug = UnityEngine.Debug;
 
@@ -56,6 +60,13 @@ namespace NeonWhiteQoL
         // stores fake/true ranks for remapping display
         public static Dictionary<int, int> ranksDict = new Dictionary<int, int>();
 
+        public static ScoreData[] scoreDataCache;
+        public static SteamLeaderboard_t cachedSteamLeaderboard_t;
+        public static SteamLeaderboard_t newSteamLeaderboard_t;
+        public static int highestRankCached = rankCount;
+
+        private static readonly FieldInfo _leaderboardsRefInfo = typeof(LeaderboardIntegrationSteam).GetField("leaderboardsRef", BindingFlags.NonPublic | BindingFlags.Static);
+
 
         public void Start()
         {
@@ -69,22 +80,24 @@ namespace NeonWhiteQoL
             postfix = new(typeof(CheaterBanlist).GetMethod("PostGetDownloadedLeaderboardEntry"));
             NeonLite.Harmony.Patch(target, null, postfix);
 
-            target = typeof(LeaderboardScore).GetMethod("SetScore");
-            HarmonyMethod prefix = new(typeof(CheaterBanlist).GetMethod("PreSetScore"));
-            NeonLite.Harmony.Patch(target, prefix);
+            //target = typeof(LeaderboardScore).GetMethod("SetScore");
+            //HarmonyMethod prefix = new(typeof(CheaterBanlist).GetMethod("PreSetScore"));
+            //NeonLite.Harmony.Patch(target, prefix);
 
             target = typeof(Leaderboards).GetMethod("DisplayScores_AsyncRecieve");
-            prefix = new(typeof(CheaterBanlist).GetMethod("PreDisplayScores_AsyncRecieve"));
+            HarmonyMethod prefix = new(typeof(CheaterBanlist).GetMethod("PreDisplayScores_AsyncRecieve"));
             postfix = new(typeof(CheaterBanlist).GetMethod("PostDisplayScores_AsyncRecieve"));
             NeonLite.Harmony.Patch(target, prefix, postfix);
-
-            target = typeof(SteamUserStats).GetMethod("DownloadLeaderboardEntries", BindingFlags.Static | BindingFlags.Public);
-            postfix = new(typeof(CheaterBanlist).GetMethod("PreDownloadLeaderboardEntries"));
-            NeonLite.Harmony.Patch(target, postfix);
 
             target = typeof(LeaderboardIntegrationSteam).GetMethod("OnLeaderboardScoreDownloadGlobalResult2", BindingFlags.Static | BindingFlags.Public);
             HarmonyMethod transpiler = new(typeof(CheaterBanlist).GetMethod("Transpiler"));
             NeonLite.Harmony.Patch(target, null, null, transpiler);
+
+            target = typeof(SteamUserStats).GetMethod("DownloadLeaderboardEntries", BindingFlags.Static | BindingFlags.Public);
+            prefix = new(typeof(CheaterBanlist).GetMethod("PreDownloadLeaderboardEntries"));
+            NeonLite.Harmony.Patch(target, prefix);
+
+            
         }
 
         public IEnumerator DownloadCheaters()
@@ -126,6 +139,7 @@ namespace NeonWhiteQoL
             CheaterBanlist.globalRank = globalRank;
         }
 
+
         public static void PostGetDownloadedLeaderboardEntry(ref SteamLeaderboardEntries_t hSteamLeaderboardEntries, ref int index, ref LeaderboardEntry_t pLeaderboardEntry, ref int[] pDetails, ref int cDetailsMax, ref bool __result)
         {
             if (friendsOnly != null && pLeaderboardEntry.m_steamIDUser.m_SteamID != 0 && bannedIDs.Contains(pLeaderboardEntry.m_steamIDUser.m_SteamID))
@@ -134,22 +148,50 @@ namespace NeonWhiteQoL
             }
             friendsOnly = null;
         }
-
-        public static void PreDownloadLeaderboardEntries(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, ref int nRangeStart, ref int nRangeEnd)
+        public static bool PreDownloadLeaderboardEntries(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, ref int nRangeStart, ref int nRangeEnd)
         {
-            rankStart = nRangeStart;
-            // if in top ranks and not getting data for friends leaderboard increase count requested
-            if (rankStart < rankCount && eLeaderboardDataRequest != ELeaderboardDataRequest.k_ELeaderboardDataRequestFriends)
+
+            Leaderboards leaderboard = (Leaderboards)_leaderboardsRefInfo.GetValue(null);
+            Melon<NeonLite>.Logger.Msg("leaderboard request " + hSteamLeaderboard.m_SteamLeaderboard.ToString() +" start " + nRangeStart.ToString() + " end " + nRangeEnd.ToString());
+            if (eLeaderboardDataRequest == ELeaderboardDataRequest.k_ELeaderboardDataRequestFriends) return true;
+            else
             {
-                 // remember what rank we are supposed to start display on
-                nRangeStart = 0;
-                nRangeEnd = rankCount;
-            }
-        }
+                newSteamLeaderboard_t = hSteamLeaderboard;
+                rankStart = nRangeStart;
+                if (cachedSteamLeaderboard_t.m_SteamLeaderboard != newSteamLeaderboard_t.m_SteamLeaderboard)
+                {
+                    Melon<NeonLite>.Logger.Msg("Doesn't match cache" );
+                    // if in top ranks and not getting data for friends leaderboard increase count requested
+                    if (rankStart < rankCount)
+                    {
+                        Melon<NeonLite>.Logger.Msg("In top 500");
+                        nRangeStart = 0;
+                        nRangeEnd = rankCount;
+                    }
+                    return true;
+                }
+                else if (rankStart > rankCount)
+                {
+                    Melon<NeonLite>.Logger.Msg("Matches cache but above top 500, use requested value");
+                    return true;
+                }
+                else if (rankStart > scoreDataCache.Length)
+                {
+                    Melon<NeonLite>.Logger.Msg("Matches cache but is above highest cached rank " + highestRankCached.ToString());
+                    nRangeStart = highestRankCached + 1;
+                    nRangeEnd = nRangeStart + 9;
+                    return true;
+                }
+                else
+                {
+                    Melon<NeonLite>.Logger.Msg("Using cache of size" + scoreDataCache.Length.ToString());
 
-        public static void PreSetScore(ref ScoreData newData, ref bool globalNeonRankings)
-        {
-            newData._ranking = ranksDict[newData._ranking];
+                    var selectedScoreDatas = new ScoreData[10];
+                    Array.Copy(scoreDataCache, rankStart - 1, selectedScoreDatas, 0, Math.Min(10, scoreDataCache.Length - rankStart));
+                    leaderboard.DisplayScores_AsyncRecieve(selectedScoreDatas, true);
+                    return false;
+                }
+            }
         }
 
         public static void PostDisplayScores_AsyncRecieve()
@@ -161,37 +203,44 @@ namespace NeonWhiteQoL
 
         public static void PreDisplayScores_AsyncRecieve(ref ScoreData[] scoreDatas)
         {
-            // if we are in the top rankCount ranks, recalculate and return first 10 non cheaters higher than starting rank
-            // if only scoreDatas.Length is 10 or less then this is a friends page or we aren't in the top ranks so don't do anything (pass scoreDatas as normal)
-            if (rankStart < rankCount && scoreDatas.Length > 10)
+            if (scoreDatas.Length > 10)
             {
-                ScoreData[] resultScoreDatas = new ScoreData[10];
-                int fixedRank = 0;
-                int j = 0;
 
-                for (int i = 0; i < scoreDatas.Length; i++)
+
+                ScoreData[] resultScoreDatas = scoreDatas.Where(x => !cheaters.Contains(x._ranking)).ToArray();
+
+                int fixedRank = 1;
+                bool foundUser = false;
+                bool foundNewStartRank = false;
+                highestRankCached = resultScoreDatas.Last()._ranking;
+                for (int i = 0; i < resultScoreDatas.Length; i++)
                 {
-                    if (!cheaters.Contains(scoreDatas[i]._ranking))
+                    if (!foundNewStartRank)
                     {
-                        fixedRank += 1;
-                        if (scoreDatas[i]._ranking >= rankStart)
+                        if(resultScoreDatas[i]._ranking == rankStart)
                         {
-                            // store fixed ranks in dict to apply after setscore is called
-                            ranksDict.Add(scoreDatas[i]._ranking, fixedRank);
-                            resultScoreDatas[j] = scoreDatas[i];
-                            j += 1;
+                            rankStart = fixedRank;
+                            foundNewStartRank = true;
                         }
                     }
-                    if (j == 10) break;
+                    resultScoreDatas[i]._ranking = fixedRank;
+                    if (!foundUser)
+                    {
+                        if (resultScoreDatas[i]._userScore)
+                        {
+                            Leaderboards leaderboard = (Leaderboards)_leaderboardsRefInfo.GetValue(null);
+                            leaderboard.SetUserRanking(fixedRank);
+                            foundUser = true;
+                        }
+                    }
+                    fixedRank += 1;
                 }
-                scoreDatas = resultScoreDatas;
-            }
-            else
-            {
-                for (int i = 0; i < 10; i++)
-                {
-                    ranksDict.Add(scoreDatas[i]._ranking, scoreDatas[i]._ranking);
-                }
+
+                scoreDataCache = resultScoreDatas;
+                cachedSteamLeaderboard_t = newSteamLeaderboard_t;
+                var selectedScoreDatas = new ScoreData[10];
+                Array.Copy(scoreDataCache, rankStart - 1, selectedScoreDatas,0, Math.Min(10, scoreDataCache.Length-rankStart));
+                scoreDatas = selectedScoreDatas;
             }
         }
 
