@@ -64,6 +64,7 @@ namespace NeonWhiteQoL
         public static SteamLeaderboard_t cachedSteamLeaderboard_t;
         public static SteamLeaderboard_t newSteamLeaderboard_t;
         public static int highestRankCached = rankCount;
+        public static int? userRankFixed = null;
 
         private static readonly FieldInfo _leaderboardsRefInfo = typeof(LeaderboardIntegrationSteam).GetField("leaderboardsRef", BindingFlags.NonPublic | BindingFlags.Static);
 
@@ -96,6 +97,10 @@ namespace NeonWhiteQoL
             target = typeof(SteamUserStats).GetMethod("DownloadLeaderboardEntries", BindingFlags.Static | BindingFlags.Public);
             prefix = new(typeof(CheaterBanlist).GetMethod("PreDownloadLeaderboardEntries"));
             NeonLite.Harmony.Patch(target, prefix);
+
+            target = typeof(LeaderboardIntegrationSteam).GetMethod("OnUserRankingFoundIntialLevelSetup", BindingFlags.Static | BindingFlags.Public);
+            postfix = new(typeof(CheaterBanlist).GetMethod("PostOnUserRankingFoundIntialLevelSetup"));
+            NeonLite.Harmony.Patch(target, null, postfix);
 
             
         }
@@ -151,7 +156,6 @@ namespace NeonWhiteQoL
         public static bool PreDownloadLeaderboardEntries(SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, ref int nRangeStart, ref int nRangeEnd)
         {
 
-            Leaderboards leaderboard = (Leaderboards)_leaderboardsRefInfo.GetValue(null);
             Melon<NeonLite>.Logger.Msg("leaderboard request " + hSteamLeaderboard.m_SteamLeaderboard.ToString() +" start " + nRangeStart.ToString() + " end " + nRangeEnd.ToString());
             if (eLeaderboardDataRequest == ELeaderboardDataRequest.k_ELeaderboardDataRequestFriends) return true;
             else
@@ -160,6 +164,7 @@ namespace NeonWhiteQoL
                 rankStart = nRangeStart;
                 if (cachedSteamLeaderboard_t.m_SteamLeaderboard != newSteamLeaderboard_t.m_SteamLeaderboard)
                 {
+                    userRankFixed = null;
                     Melon<NeonLite>.Logger.Msg("Doesn't match cache" );
                     // if in top ranks and not getting data for friends leaderboard increase count requested
                     if (rankStart < rankCount)
@@ -186,8 +191,13 @@ namespace NeonWhiteQoL
                 {
                     Melon<NeonLite>.Logger.Msg("Using cache of size" + scoreDataCache.Length.ToString());
 
+                    Leaderboards leaderboard = (Leaderboards)_leaderboardsRefInfo.GetValue(null);
                     var selectedScoreDatas = new ScoreData[10];
                     Array.Copy(scoreDataCache, rankStart - 1, selectedScoreDatas, 0, Math.Min(10, scoreDataCache.Length - rankStart));
+                    if (userRankFixed != null)
+                    {
+                        leaderboard.SetUserRanking((int)userRankFixed);
+                    }
                     leaderboard.DisplayScores_AsyncRecieve(selectedScoreDatas, true);
                     return false;
                 }
@@ -200,6 +210,14 @@ namespace NeonWhiteQoL
             ranksDict.Clear();
         }
 
+        public static void PostOnUserRankingFoundIntialLevelSetup()
+        {
+            if (userRankFixed != null)
+            {
+                Leaderboards leaderboard = (Leaderboards)_leaderboardsRefInfo.GetValue(null);
+                leaderboard.SetUserRanking((int)userRankFixed);
+            }
+        }
 
         public static void PreDisplayScores_AsyncRecieve(ref ScoreData[] scoreDatas)
         {
@@ -212,12 +230,13 @@ namespace NeonWhiteQoL
                 int fixedRank = 1;
                 bool foundUser = false;
                 bool foundNewStartRank = false;
+                userRankFixed = null;
                 highestRankCached = resultScoreDatas.Last()._ranking;
                 for (int i = 0; i < resultScoreDatas.Length; i++)
                 {
                     if (!foundNewStartRank)
                     {
-                        if(resultScoreDatas[i]._ranking == rankStart)
+                        if(resultScoreDatas[i]._ranking >= rankStart)
                         {
                             rankStart = fixedRank;
                             foundNewStartRank = true;
@@ -230,6 +249,7 @@ namespace NeonWhiteQoL
                         {
                             Leaderboards leaderboard = (Leaderboards)_leaderboardsRefInfo.GetValue(null);
                             leaderboard.SetUserRanking(fixedRank);
+                            userRankFixed = fixedRank;
                             foundUser = true;
                         }
                     }
